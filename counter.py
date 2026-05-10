@@ -1,9 +1,24 @@
 import tkinter as tk
-from pynput import keyboard
 from screeninfo import get_monitors
 import os
+import hid
+import threading
+import time
 
 SAVE_FILE = "counter.txt"
+
+# PS4/PS5 vendor and product IDs
+PS4_VENDOR  = 0x054C
+PS4_PRODUCT = 0x05C4  # DualShock 4 v1
+PS4_PRODUCT2 = 0x09CC # DualShock 4 v2
+PS5_PRODUCT = 0x0CE6  # DualSense
+
+# Button byte/bit positions in the HID report
+# Byte 5 contains the face buttons
+SQUARE_BIT   = 4
+CROSS_BIT    = 5
+CIRCLE_BIT   = 6
+TRIANGLE_BIT = 7
 
 # Loads the counter.txt file
 def load_counter():
@@ -29,7 +44,6 @@ def get_current_monitor():
     return get_monitors()[0]
 
 counter = load_counter()
-pressed_keys = set()
 combo_used = False
 
 # Auto adjust size of window
@@ -46,39 +60,65 @@ def update_label():
     y = monitor.y + margin
     root.geometry(f"{win_width}x{win_height}+{x}+{y}")
 
-# Increase counter on key press
-def on_press(key):
+# Discovered controller and return type
+def find_controller():
+    for vendor, product in [
+        (PS4_VENDOR, PS4_PRODUCT),
+        (PS4_VENDOR, PS4_PRODUCT2),
+        (PS4_VENDOR, PS5_PRODUCT),
+    ]:
+        try:
+            d = hid.device()
+            d.open(vendor, product)
+            return d
+        except:
+            continue
+    return None
+
+# Thread that listens for controller inputs
+def controller_listener():
     global counter, combo_used
-    try:
-        pressed_keys.add(key.char)
-    except AttributeError:
-        pressed_keys.add(key)
 
-    if ('z' in pressed_keys and
-        'x' in pressed_keys and
-        'c' in pressed_keys and
-        'v' in pressed_keys and
-        not combo_used):
-            combo_used = True
-            counter += 2 # Increment Number
-            root.after(0, update_label)
+    gamepad = None
+    while gamepad is None:
+        print("Waiting for controller...")
+        gamepad = find_controller()
+        if gamepad is None:
+            time.sleep(1)
 
-# Does not allow for hold
-def on_release(key):
-    global combo_used
-    try:
-        pressed_keys.discard(key.char)
-    except AttributeError:
-        pressed_keys.discard(key)
+    gamepad.set_nonblocking(False)
+    print("Controller found!")
 
-    if ('z' not in pressed_keys or
-        'x' not in pressed_keys or
-        'c' not in pressed_keys or
-        'v' not in pressed_keys):
-            combo_used = False
+    while True:
+        try:
+            report = gamepad.read(64)
+            if report:
+                buttons = report[5]
+                cross    = bool(buttons & (1 << CROSS_BIT))
+                circle   = bool(buttons & (1 << CIRCLE_BIT))
+                square   = bool(buttons & (1 << SQUARE_BIT))
+                triangle = bool(buttons & (1 << TRIANGLE_BIT))
 
-listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-listener.start()
+                all_pressed = cross and circle and square and triangle
+
+                if all_pressed and not combo_used:
+                    combo_used = True
+                    counter += 2
+                    root.after(0, update_label)
+                elif not all_pressed:
+                    combo_used = False
+
+        except Exception as e:
+            print(f"Controller error: {e}")
+            gamepad = None
+            while gamepad is None:
+                print("Reconnecting...")
+                gamepad = find_controller()
+                time.sleep(1)
+            gamepad.set_nonblocking(False)
+
+thread = threading.Thread(target=controller_listener, daemon=True)
+thread.start()
 
 # Formatting options
 root = tk.Tk()
